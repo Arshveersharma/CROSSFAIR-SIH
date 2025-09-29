@@ -1,0 +1,300 @@
+import numpy as np
+import torch
+import torch.cuda as cuda
+import gymnasium as gym
+import traci
+import sumolib
+from gymnasium import spaces
+import matplotlib.pyplot as plt
+from concurrent.futures import ProcessPoolExecutor
+import pandas as pd
+import os
+import signal
+import sys
+from stable_baselines3 import SAC
+from stable_baselines3.common.vec_env import SubprocVecEnv
+import os.path
+from pathlib import Path
+
+def get_device_info():
+    if cuda.is_available():
+        device = "cuda"
+        device_name = torch.cuda.get_device_name(0)
+        print(f"Using CUDA device: {device_name}")
+    else:
+        device = "cpu"
+        print("Using CPU - CUDA not available")
+    return device
+
+device = get_device_info()
+
+class SUMOEnvironment(gym.Env):
+    def __init__(self, config=None):
+        super().__init__()
+        self.sumocfg_file = config.get('sumocfg_file', "E:\CODING\gityoutube\Test.sumocfg")
+        
+        # Validate SUMO config file path
+        if not os.path.isfile(self.sumocfg_file):
+            raise FileNotFoundError(f"SUMO config file not found: {self.sumocfg_file}")
+        
+        self.simulation_steps = 0
+        self.max_steps = config.get('max_timesteps', 900)
+        
+        try:
+    # Start SUMO and initialize connection
+            traci.start(['sumo', '-c', self.sumocfg_file])
+            print("SUMO started successfully")
+        except Exception as e:
+            print("Failed to start SUMO:", e)    
+            # Get initial lists after SUMO starts
+            self.tls_ids = traci.trafficlight.getIDList()
+            self.vehicle_ids = traci.vehicle.getIDList()
+            
+            self.control_type = "traffic_lights"
+            num_controls = len(self.tls_ids) if self.control_type == "traffic_lights" else len(self.vehicle_ids)
+            
+            # Define spaces after we have the proper counts
+            self.action_space = spaces.Box(
+                low=-1.0,
+                high=1.0,
+                shape=(max(1, num_controls)),  # Ensure at least 1 dimension
+                dtype=np.float32
+            )
+            
+            self.observation_space = spaces.Box(
+                low=0.0,
+                high=100.0,
+                shape=(max(1, len(self.vehicle_ids))),  # Ensure at least 1 dimension
+                dtype=np.float32
+            )
+            
+        except Exception as e:
+            print(f"Error initializing SUMO environment: {e}")
+            if traci.start(['sumo', '-c', self.sumocfg_file]):
+                traci.close()
+            raise
+
+    def reset(self, **kwargs):
+        try:
+            if traci.start(['sumo', '-c', self.sumocfg_file]):
+                traci.close()
+            traci.start(['sumo', '-c', self.sumocfg_file])
+            self.simulation_steps = 0
+            # Update IDs after reset
+            self.tls_ids = traci.trafficlight.getIDList()
+            self.vehicle_ids = traci.vehicle.getIDList()
+            obs = self._get_observation()
+            return obs, {}
+        except Exception as e:
+            print(f"Error in reset: {e}")
+            if traci.start(['sumo', '-c', self.sumocfg_file]):
+                traci.close()
+            raise
+
+    def step(self, action):
+        self._apply_action(action)
+        traci.simulationStep()
+        self.simulation_steps += 1
+        
+        observation = self._get_observation()
+        reward = self._compute_reward()
+        done = self._is_done()
+        
+        return observation, reward, done, False, {}
+    
+    def _get_observation(self):
+        try:
+            self.vehicle_ids = traci.vehicle.getIDList()  # Update vehicle list
+            if not self.vehicle_ids:
+                return np.zeros(self.observation_space.shape[0])
+            
+            # Get speed for each vehicle (this matches our observation space)
+            speeds = []
+            for vid in self.vehicle_ids:
+                speeds.append(traci.vehicle.getSpeed(vid))
+            
+            # Pad or truncate to match observation space
+            speeds = np.array(speeds, dtype=np.float32)
+            if len(speeds) < self.observation_space.shape[0]:
+                speeds = np.pad(speeds, (0, self.observation_space.shape[0] - len(speeds)))
+            else:
+                speeds = speeds[:self.observation_space.shape[0]]
+            
+            return speeds
+        except Exception as e:
+            print(f"Error getting observation: {e}")
+            return np.zeros(self.observation_space.shape[0])
+
+    def _apply_action(self, action):
+        try:
+            if self.control_type == "traffic_lights":
+                # Apply actions to traffic lights
+                for tls_id, act in zip(self.tls_ids, action):
+                    # Convert continuous action to traffic light phase
+                    # Assuming action space is [-1, 1]
+                    phases = traci.trafficlight.getAllProgramLogics(tls_id)[0].phases
+                    phase_index = int((act + 1) * len(phases) / 2) % len(phases)
+                    traci.trafficlight.setPhase(tls_id, phase_index)
+            else:
+                # Apply actions to vehicles
+                for vid, act in zip(self.vehicle_ids, action):
+                    if vid in traci.vehicle.getIDList():  # Check if vehicle still exists
+                        # Convert continuous action to speed adjustment
+                        current_speed = traci.vehicle.getSpeed(vid)
+                        speed_change = act * 5  # Scale action to speed change (-5 to +5 m/s)
+                        new_speed = max(0, current_speed + speed_change)
+                        traci.vehicle.setSpeed(vid, new_speed)
+        except Exception as e:
+            print(f"Error applying action: {e}")
+
+    def _compute_reward(self):
+        try:
+            vehicle_ids = traci.vehicle.getIDList()
+            if not vehicle_ids:
+                return 0.0
+            
+            # Calculate reward based on:
+            # 1. Average speed of all vehicles
+            # 2. Number of stopped vehicles
+            # 3. Average waiting time
+            avg_speed = np.mean([traci.vehicle.getSpeed(vid) for vid in vehicle_ids])
+            stopped_vehicles = sum(1 for vid in vehicle_ids if traci.vehicle.getSpeed(vid) < 0.1)
+            avg_waiting_time = np.mean([traci.vehicle.getWaitingTime(vid) for vid in vehicle_ids])
+            
+            # Combine metrics into reward
+            speed_reward = avg_speed / traci.vehicle.getMaxSpeed(vehicle_ids[0])  # Normalize speed
+            stopped_penalty = -0.2 * (stopped_vehicles / len(vehicle_ids))  # Penalty for stopped vehicles
+            waiting_penalty = -0.1 * (avg_waiting_time / 60.0)  # Normalize waiting time by minute
+            
+            reward = speed_reward + stopped_penalty + waiting_penalty
+            return float(reward)
+        except Exception as e:
+            print(f"Error computing reward: {e}")
+            return 0.0
+    
+    def _is_done(self):
+        return (self.simulation_steps >= self.max_steps or 
+                traci.simulation.getMinExpectedNumber() <= 0)
+    
+    def close(self):
+        if traci.start(['sumo', '-c', self.sumocfg_file]):
+            traci.close()
+
+def make_env(env_config, seed):
+    def _init():
+        env=SUMOEnvironment(env_config)
+        env.reset(seed=seed)
+        return env
+    return _init
+
+def train_with_seed(args):
+    seed, env_config = args
+    checkpoint_dir = f"./checkpoints/seed_{seed}"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    env = SubprocVecEnv([make_env(env_config, seed) for _ in range(2)])
+    
+    model = SAC(
+        "MlpPolicy", 
+        env,
+        learning_rate=3e-4,
+        buffer_size=50000,
+        batch_size=256,
+        tau=0.005,
+        gamma=0.99,
+        ent_coef="auto",
+        target_update_interval=1,
+        seed=seed,
+        device=device
+    )
+    
+    metrics_history = {'rewards': []}
+    best_reward = float('-inf')
+    patience = 10
+    no_improve_count = 0
+    
+    try:
+        for i in range(100):
+            model.learn(total_timesteps=1000, log_interval=10)
+            
+            # Evaluation
+            episode_rewards = []
+            obs = env.reset()
+            for _ in range(10):
+                done = False
+                total_reward = 0
+                while not done:
+                    action, _ = model.predict(obs, deterministic=True)
+                    obs, reward, done, _, _ = env.step(action)
+                    total_reward += reward
+                episode_rewards.append(total_reward)
+            
+            current_reward = np.mean(episode_rewards)
+            metrics_history['rewards'].append(current_reward)
+            
+            if current_reward > best_reward:
+                best_reward = current_reward
+                model.save(f"{checkpoint_dir}/best_model")
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+            
+            if no_improve_count >= patience:
+                print(f"Early stopping for seed {seed} at iteration {i}")
+                break
+            
+            if i % 10 == 0:
+                print(f"Seed {seed}, Iteration {i}, Reward: {current_reward:.2f}")
+    except Exception as e:
+        print(f"Error during training with seed {seed}: {e}")
+    finally:
+        env.close()
+    
+    return metrics_history
+
+def main():
+    # Validate file path before starting
+    config_file = Path("E:/CODING/gityoutube/Test.sumocfg")
+    if not config_file.is_file():
+        print(f"Error: SUMO config file not found at {config_file}")
+        sys.exit(1)
+    
+    seeds = [42, 123, 456, 789, 101112]
+    env_config = {
+        'sumocfg_file': str(config_file),
+        'max_timesteps': 900
+    }
+    
+    try:
+        with ProcessPoolExecutor(max_workers=len(seeds)) as executor:
+            all_results = list(executor.map(train_with_seed, [(seed, env_config) for seed in seeds]))
+        
+        df = pd.DataFrame([r['rewards'] for r in all_results]).T
+        mean_rewards = df.mean(axis=1)
+        std_rewards = df.std(axis=1)
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(mean_rewards, label='Mean Reward')
+        plt.fill_between(
+            range(len(mean_rewards)),
+            mean_rewards - std_rewards,
+            mean_rewards + std_rewards,
+            alpha=0.2
+        )
+        plt.xlabel('Training Iteration')
+        plt.ylabel('Mean Episode Reward')
+        plt.title('SAC Training Results (with variance)')
+        plt.legend()
+        plt.savefig('training_results.png')
+        plt.close()
+        
+        print(f"Final mean reward: {mean_rewards.iloc[-1]:.2f} ± {std_rewards.iloc[-1]:.2f}")
+        
+    except Exception as e:
+        print(f"Error in main execution: {e}")
+    finally:
+        if traci.start(['sumo', '-c', self.sumocfg_file]):
+            traci.close()
+
+if __name__ == "__main__":
+    main()
