@@ -1,5 +1,12 @@
 import os
 import sys
+import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
+import traci
+import sumolib
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_checker import check_env
 
 # Set SUMO_HOME environment variable
 SUMO_HOME = os.path.abspath('D:/SumoTest')
@@ -19,14 +26,6 @@ if os.path.exists(bin_path):
             os.environ['PATH'] = bin_path + os.pathsep + os.environ['PATH']
     else:
         os.environ['PATH'] = bin_path
-
-import numpy as np
-import gymnasium as gym
-from gymnasium import spaces
-import traci
-import sumolib
-from stable_baselines3 import PPO
-from stable_baselines3.common.env_checker import check_env
 
 # Configuration constants
 USE_GUI = True  # Set to True to see the SUMO-GUI visualization
@@ -219,8 +218,8 @@ def main():
     env = SumoTrafficEnv(
         sumo_cfg_file=SUMO_CFG_FILE,
         gui=USE_GUI,
-        max_steps=30,
-        delta_time=5
+        max_steps=900,
+        delta_time=1
     )
 
     print("\nChecking environment...")
@@ -265,19 +264,19 @@ def main():
     print("Starting PPO Training...")
     env = SumoTrafficEnv(
         sumo_cfg_file=SUMO_CFG_FILE,
-        gui=False,
-        max_steps=30,
-        delta_time=5
+        gui=True,
+        max_steps=900,
+        delta_time=1
     )
 
     model = PPO(
         "MlpPolicy",
         env,
-        verbose=1,
+        verbose=0,
         learning_rate=3e-4,
         n_steps=2048,
-        batch_size=16,
-        n_epochs=10,
+        batch_size=32,
+        n_epochs=100,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
@@ -322,3 +321,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
