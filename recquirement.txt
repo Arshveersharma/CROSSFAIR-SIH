@@ -1,0 +1,15 @@
+RECQUIREMENTS FOR RUNNING THE PROTOTYPE:
+Install-
+1)NUMPY(version 1.26.4)
+2)PANDAS(version 2.2.2)
+3)GYMNASIUM(version 0.29.1)
+4)TRACI(version 1.20.0)
+6)SUMO
+5)SUMOLIB(version 1.20.0)
+6)STABLE-BASELINE3(version 2.3.2)
+7)TORCH(version 2.2.2+cu121)
+8)TORCHVISION(version 0.17.2+cu121)
+9)TORCHAUDIO(version 2.2.2+cu121)
+10)MATPLOTLIB(version 3.9.0)
+11)OPENCV-PYTHON(version 4.10.0.84)
+12)SUMO
