@@ -11,6 +11,25 @@ from collections import deque
 import traci
 import sumolib
 from datetime import datetime
+# Set SUMO_HOME environment variable
+SUMO_HOME = os.path.abspath('D:/SumoTest')
+os.environ['SUMO_HOME'] = SUMO_HOME
+
+# Add SUMO tools to Python path
+if os.path.exists(os.path.join(SUMO_HOME, 'tools')):
+    tools_path = os.path.join(SUMO_HOME, 'tools')
+    if tools_path not in sys.path:
+        sys.path.insert(0, tools_path)
+
+# Add SUMO bin to PATH if it exists
+bin_path = os.path.join(SUMO_HOME, 'bin')
+if os.path.exists(bin_path):
+    if 'PATH' in os.environ:
+        if bin_path not in os.environ['PATH']:
+            os.environ['PATH'] = bin_path + os.pathsep + os.environ['PATH']
+    else:
+        os.environ['PATH'] = bin_path
+
 
 # Check for CUDA availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
