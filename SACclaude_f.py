@@ -400,14 +400,36 @@ class SUMOEnvironment:
             conn.simulationStep()
 
             total_waiting = 0
+            total_moving = 0
+            max_speed_sum = 0
+            
             for tl_id in self.traffic_lights:
                 lanes = conn.trafficlight.getControlledLanes(tl_id)
                 for lane in lanes:
+                    # Count waiting vehicles
                     total_waiting += conn.lane.getWaitingTime(lane)
-
-            reward = -total_waiting / 100.0
+                    
+                    # Count vehicles that are moving
+                    vehicles = conn.lane.getLastStepVehicleIDs(lane)
+                    for vehicle in vehicles:
+                        speed = conn.vehicle.getSpeed(vehicle)
+                        if speed > 0.1:  # Consider vehicles moving if speed > 0.1 m/s
+                            total_moving += 1
+                        max_speed = conn.lane.getMaxSpeed(lane)
+                        max_speed_sum += max_speed
+            
+            # Calculate normalized rewards
+            waiting_penalty = -total_waiting / (1000.0 * max(1, len(self.traffic_lights)))  # Scale by number of traffic lights
+            movement_reward = total_moving * 5  # Positive reward for moving vehicles
+            
+            # Combine rewards with proper scaling
+            reward = waiting_penalty + movement_reward
+            
+            # Clip reward to reasonable range
+            reward = max(min(reward, 1000), -1000)
+            
             rewards.append(reward)
-
+            
             done = conn.simulation.getMinExpectedNumber() <= 0
             dones.append(done)
 
